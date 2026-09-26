@@ -1,0 +1,115 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Fetshou El Kotob APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
+
+      - name: Find project ZIP (fail if more than one)
+        id: find_zip
+        shell: bash
+        run: |
+          set -e
+          mapfile -t ZIPS < <(find . -maxdepth 3 -type f -iname "*.zip" ! -path "./.git/*")
+          echo "ملفات الـ zip الموجودة في المستودع:"
+          printf '%s\n' "${ZIPS[@]}"
+          if [ "${#ZIPS[@]}" -eq 0 ]; then
+            echo "::error::مفيش ولا ملف zip في المستودع."
+            exit 1
+          fi
+          if [ "${#ZIPS[@]}" -gt 1 ]; then
+            echo "::error::فيه أكتر من ملف zip في المستودع. سيبي واحد بس واحذفي الباقي."
+            exit 1
+          fi
+          echo "هيتم البناء من: ${ZIPS[0]}"
+          echo "zip_file=${ZIPS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract Flutter project
+        shell: bash
+        run: |
+          set -e
+          rm -rf extracted_project
+          mkdir -p extracted_project
+          unzip -q "${{ steps.find_zip.outputs.zip_file }}" -d extracted_project
+
+      - name: Locate Flutter project
+        id: locate_project
+        shell: bash
+        run: |
+          set -e
+          PUBSPEC=$(find extracted_project -type f -name "pubspec.yaml" -not -path "*/.dart_tool/*" | head -n 1)
+          if [ -z "$PUBSPEC" ]; then
+            echo "::error::pubspec.yaml مش موجود."
+            exit 1
+          fi
+          echo "project_dir=$(dirname "$PUBSPEC")" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Prepare Flutter project
+        working-directory: ${{ steps.locate_project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -e
+          mkdir -p android
+          echo "flutter.sdk=$FLUTTER_ROOT" > android/local.properties
+          echo "flutter.versionName=1.0.0" >> android/local.properties
+          echo "flutter.versionCode=1" >> android/local.properties
+
+      - name: Flutter pub get
+        working-directory: ${{ steps.locate_project.outputs.project_dir }}
+        run: flutter pub get
+
+      - name: Flutter tests
+        working-directory: ${{ steps.locate_project.outputs.project_dir }}
+        run: flutter test
+
+      - name: Build release APK
+        working-directory: ${{ steps.locate_project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -o pipefail
+          flutter build apk --release 2>&1 | tee /tmp/build_log.txt
+
+      - name: Show real error if build failed
+        if: failure()
+        shell: bash
+        run: |
+          echo "===== آخر ٨٠ سطر فيهم رسالة الخطأ الحقيقية ====="
+          tail -n 80 /tmp/build_log.txt
+
+      - name: Prepare APK artifact
+        working-directory: ${{ steps.locate_project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -e
+          cp build/app/outputs/flutter-apk/app-release.apk fetshou-el-kotob-release.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fetshou-el-kotob-release-apk
+          path: ${{ steps.locate_project.outputs.project_dir }}/fetshou-el-kotob-release.apk
+          if-no-files-found: error
